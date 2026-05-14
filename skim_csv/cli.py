@@ -1,60 +1,85 @@
-"""Command-line entry point for skim-csv."""
+"""Command-line interface for skim-csv."""
 
 from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
+from typing import List
 
+from skim_csv.reader import stream_csv, iter_rows, detect_headers
+from skim_csv.profiler import ColumnProfile, update
 from skim_csv.formatter import render_table
-from skim_csv.profiler import profile_chunks
-from skim_csv.reader import stream_csv
+from skim_csv.exporter import export_profiles
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="skim-csv",
-        description="Fast CSV profiler — no full load into memory.",
+        description="Fast CSV profiler — summarise large files without loading them fully.",
     )
-    parser.add_argument("file", type=Path, help="Path to the CSV file.")
+    parser.add_argument("file", help="Path to the CSV file to profile.")
     parser.add_argument(
-        "--chunk-size", type=int, default=1000,
-        metavar="N", help="Rows per processing chunk (default: 1000)."
+        "--chunk-size",
+        type=int,
+        default=1024 * 64,
+        metavar="BYTES",
+        help="Read chunk size in bytes (default: 65536).",
     )
     parser.add_argument(
-        "--delimiter", default=",",
-        help="CSV delimiter character (default: comma)."
+        "--delimiter",
+        default=",",
+        metavar="CHAR",
+        help="CSV delimiter character (default: comma).",
     )
     parser.add_argument(
-        "--encoding", default="utf-8",
-        help="File encoding (default: utf-8)."
+        "--export",
+        choices=["json", "csv"],
+        default=None,
+        metavar="FORMAT",
+        help="Export profile summary as 'json' or 'csv' instead of table.",
+    )
+    parser.add_argument(
+        "--output",
+        default=None,
+        metavar="FILE",
+        help="Write export output to FILE instead of stdout.",
     )
     return parser
 
 
-def run(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-
+def run(args: argparse.Namespace) -> int:
     try:
-        chunks = stream_csv(
-            args.file,
-            chunk_size=args.chunk_size,
-            encoding=args.encoding,
-            delimiter=args.delimiter,
-        )
-        profiles = profile_chunks(chunks)
-        total_rows = next(iter(profiles.values())).count if profiles else 0
-        print(render_table(profiles, total_rows))
-        return 0
-    except (FileNotFoundError, ValueError) as exc:
+        chunks = stream_csv(args.file, chunk_size=args.chunk_size)
+        headers, rows = iter_rows(chunks, delimiter=args.delimiter)
+    except FileNotFoundError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
+    profiles: List[ColumnProfile] = [ColumnProfile(name=h) for h in headers]
 
-def main() -> None:
-    sys.exit(run())
+    for row in rows:
+        for profile, value in zip(profiles, row):
+            update(profile, value)
+
+    if args.export:
+        output = export_profiles(profiles, args.export)
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as fh:
+                fh.write(output)
+            print(f"Profile exported to {args.output}")
+        else:
+            print(output)
+    else:
+        print(render_table(profiles))
+
+    return 0
 
 
-if __name__ == "__main__":
+def main() -> None:  # pragma: no cover
+    parser = build_parser()
+    args = parser.parse_args()
+    sys.exit(run(args))
+
+
+if __name__ == "__main__":  # pragma: no cover
     main()
