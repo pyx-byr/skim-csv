@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import List
+from typing import List, Optional
 
-from skim_csv.reader import stream_csv, iter_rows, detect_headers
-from skim_csv.profiler import ColumnProfile, update
+from skim_csv.pipeline import profile_file, summarise
 from skim_csv.formatter import render_table
 from skim_csv.exporter import export_profiles
+from skim_csv.sorter import sort_profiles, top_n, _SORT_KEYS
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -19,67 +19,85 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("file", help="Path to the CSV file to profile.")
     parser.add_argument(
+        "--delimiter", "-d", default=",", help="Field delimiter (default: comma)."
+    )
+    parser.add_argument(
+        "--no-header",
+        action="store_true",
+        help="Treat the first row as data, not a header.",
+    )
+    parser.add_argument(
         "--chunk-size",
         type=int,
-        default=1024 * 64,
-        metavar="BYTES",
-        help="Read chunk size in bytes (default: 65536).",
+        default=1000,
+        metavar="N",
+        help="Rows per read chunk (default: 1000).",
     )
     parser.add_argument(
-        "--delimiter",
-        default=",",
-        metavar="CHAR",
-        help="CSV delimiter character (default: comma).",
+        "--output", "-o",
+        choices=["table", "json", "csv"],
+        default="table",
+        help="Output format (default: table).",
     )
     parser.add_argument(
-        "--export",
-        choices=["json", "csv"],
+        "--sort-by",
+        choices=list(_SORT_KEYS),
+        default="name",
+        metavar="KEY",
+        help=f"Sort columns by metric. Choices: {_SORT_KEYS} (default: name).",
+    )
+    parser.add_argument(
+        "--sort-desc",
+        action="store_true",
+        help="Sort in descending order.",
+    )
+    parser.add_argument(
+        "--top",
+        type=int,
         default=None,
-        metavar="FORMAT",
-        help="Export profile summary as 'json' or 'csv' instead of table.",
+        metavar="N",
+        help="Show only the top N columns after sorting.",
     )
     parser.add_argument(
-        "--output",
-        default=None,
-        metavar="FILE",
-        help="Write export output to FILE instead of stdout.",
+        "--filter",
+        dest="filters",
+        action="append",
+        metavar="COL:OP:VAL",
+        help="Row filter expression, e.g. age:gt:30. May be repeated.",
     )
     return parser
 
 
-def run(args: argparse.Namespace) -> int:
+def run(argv: Optional[List[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
     try:
-        chunks = stream_csv(args.file, chunk_size=args.chunk_size)
-        headers, rows = iter_rows(chunks, delimiter=args.delimiter)
+        profiles = profile_file(
+            args.file,
+            delimiter=args.delimiter,
+            has_header=not args.no_header,
+            chunk_size=args.chunk_size,
+            filter_exprs=args.filters or [],
+        )
     except FileNotFoundError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        print(f"skim-csv: error: {exc}", file=sys.stderr)
         return 1
 
-    profiles: List[ColumnProfile] = [ColumnProfile(name=h) for h in headers]
+    # Sort
+    profiles = sort_profiles(profiles, key=args.sort_by, reverse=args.sort_desc)
 
-    for row in rows:
-        for profile, value in zip(profiles, row):
-            update(profile, value)
+    # Limit
+    if args.top is not None:
+        profiles = profiles[: args.top]
 
-    if args.export:
-        output = export_profiles(profiles, args.export)
-        if args.output:
-            with open(args.output, "w", encoding="utf-8") as fh:
-                fh.write(output)
-            print(f"Profile exported to {args.output}")
-        else:
-            print(output)
-    else:
+    if args.output == "table":
         print(render_table(profiles))
+    else:
+        print(export_profiles(profiles, fmt=args.output))
 
     return 0
 
 
 def main() -> None:  # pragma: no cover
-    parser = build_parser()
-    args = parser.parse_args()
-    sys.exit(run(args))
-
-
-if __name__ == "__main__":  # pragma: no cover
-    main()
+    sys.exit(run())
